@@ -1,0 +1,6 @@
+text,label
+I want to fly from Nairobi to Nueva York mañana,O O O O O B-LOC O B-LOC I-LOC B-DATE
+Reserva un vuelo from Nairobi to London por favor,O O O O B-LOC O B-LOC O O
+Book a flight desde Nairobi a París next week,O O O O B-LOC O B-LOC B-DATE I-DATE
+Quiero un hotel en Tokyo para mi viaje,O O O O B-LOC O O O
+Find me a restaurante in Berlin bitte,O O O O O B-LOC O

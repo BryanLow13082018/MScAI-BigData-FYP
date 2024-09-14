@@ -1,0 +1,6 @@
+text,label
+John Smith visited New York last summer,B-PER I-PER O O B-LOC I-LOC O B-DATE O
+Apple Inc. announced a new product yesterday,B-ORG I-ORG O O O O O B-DATE
+The conference will be held in London on May 15th,O O O O O O B-LOC O B-DATE I-DATE
+Maria Garcia joined Microsoft as CEO in 2022,B-PER I-PER O B-ORG O O O B-DATE
+The Eiffel Tower in Paris attracts millions of tourists,O B-LOC I-LOC O B-LOC O O O O
