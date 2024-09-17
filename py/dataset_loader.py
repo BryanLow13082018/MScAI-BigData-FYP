@@ -237,24 +237,25 @@ class DatasetLoader:
             # Read the file content
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-
-            # Split the content into sentences
-            sentences = content.strip().split('\n\n')
-
+    
+            # Split the content into sentences and remove trailing line breaks
+            sentences = [sentence.strip() for sentence in content.strip().split('\n\n')]
+    
             # Process each sentence
             processed_data = []
             for sentence in sentences:
                 tokens = sentence.strip().split('\n')
                 text = ' '.join([token.split()[0] for token in tokens])
                 labels = ' '.join([token.split()[-1] for token in tokens])
-                processed_data.append({'text': text, 'label': labels})
-
+                processed_data.append({'text': text.strip(), 'label': labels.strip()})  # Remove any trailing spaces from text and labels
+    
             df = pd.DataFrame(processed_data)
             self.logger.info(f"Loaded {len(df)} samples from {file_path}")
             return df
         except Exception as e:
             self.logger.error(f"Error loading file {file_path}: {str(e)}")
             return None
+
 
     def log_class_distribution(self, dataset, set_name):
         """
@@ -652,11 +653,22 @@ class DatasetLoader:
         
         for source_lang, target_lang in language_pairs:
             pair_data = self.get_parallel_data(flores_data, source_lang, target_lang, split='devtest')
-            if len(pair_data) > samples_per_pair:
-                pair_data = pair_data.sample(n=samples_per_pair, random_state=self.config['seed'])
-            evaluation_data.append(pair_data)
+            
+            # Ensure pair_data is not empty before sampling
+            if not pair_data.empty:
+                if len(pair_data) > samples_per_pair:
+                    pair_data = pair_data.sample(n=samples_per_pair, random_state=self.config['seed'])
+                evaluation_data.append(pair_data)
+            else:
+                logging.warning(f"No data found for the language pair: {source_lang} -> {target_lang}")
+    
+        # Concatenate the evaluation data and reset index
+        if evaluation_data:
+            return pd.concat(evaluation_data, ignore_index=True)
+        else:
+            logging.warning("No evaluation data was generated.")
+            return pd.DataFrame()  # Return empty DataFrame if no data was collected
 
-        return pd.concat(evaluation_data, ignore_index=True)
     
     def validate_data(self, words, labels):
         if len(words) != len(labels):
