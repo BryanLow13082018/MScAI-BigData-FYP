@@ -2,8 +2,8 @@
 model:
   names:
     - "afro-xlmr-large"
-    - "meta-llama/Llama-2-7b-hf" 
-    - "ernie-m-large"
+    - "meta-llama/Llama-2-7b-hf"  
+    #    - "ernie-m-large"
   output_dir: "./model_outputs"
 
 # Data configuration
@@ -34,7 +34,7 @@ dataset_split:
   val_ratio: 0.15
   test_ratio: 0.15
 
-# Hyperparameter tuning configuration
+# hyperparameterstuning configuration
 hyperparameters:
   learning_rate_min: 1e-6
   learning_rate_max: 1e-4
@@ -46,7 +46,7 @@ hyperparameters:
   warmup_steps_min: 50
   warmup_steps_max: 500
   gradient_accumulation_steps: [1, 2, 4, 8, 16, 32, 64, 128]
-  n_trials: 10
+  n_trials: 5
 
 # Experiment configuration
 experiments:

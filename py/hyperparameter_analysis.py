@@ -1,4 +1,5 @@
 import numpy as np
+import optuna
 import plotly.graph_objects as go
 import plotly.express as px
 from optuna.visualization import plot_param_importances, plot_optimization_history
@@ -17,7 +18,7 @@ def plot_hyperparameter_importance(study):
     fig.update_layout(title="Hyperparameter Importance")
     return fig
 
-def plot_optimization_history(study):
+def plot_study_optimization_history(study):
     """
     Plot the optimization history.
     
@@ -27,7 +28,7 @@ def plot_optimization_history(study):
     Returns:
         plotly.graph_objs._figure.Figure: A plotly figure object showing optimization history.
     """
-    fig = plot_optimization_history(study)
+    fig = optuna.visualization.plot_optimization_history(study)
     fig.update_layout(title="Optimization History")
     return fig
 
