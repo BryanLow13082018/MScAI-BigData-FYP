@@ -1,0 +1,73 @@
+# Model configuration
+model:
+  names:
+    - "afro-xlmr-large"
+    - "meta-llama/Llama-2-7b-hf"  
+    #    - "ernie-m-large"
+  output_dir: "./model_outputs"
+
+# Data configuration
+data:
+  masakhane_dir: "../Datasets/Masakhane"
+  ontonotes_dir: "../Datasets/OntoNotes_5.0"
+  flores_dir: "../Datasets/FLORES-200"
+  experiments_dir: "../Datasets/Experiments"
+
+# Training configuration
+training:
+  batch_size: 8
+  learning_rate: 2e-5
+  num_epochs: 3
+  warmup_steps: 500
+
+# Evaluation configuration
+evaluation:
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - f1
+
+# Dataset split configuration
+dataset_split:
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+
+# hyperparameterstuning configuration
+hyperparameters:
+  learning_rate_min: 1e-6
+  learning_rate_max: 1e-4
+  num_train_epochs_min: 1
+  num_train_epochs_max: 3
+  batch_sizes: [1, 2, 4, 8, 16, 32]
+  weight_decay_min: 0.01
+  weight_decay_max: 0.1
+  warmup_steps_min: 50
+  warmup_steps_max: 500
+  gradient_accumulation_steps: [1, 2, 4, 8, 16, 32, 64, 128]
+  n_trials: 5
+
+# Experiment configuration
+experiments:
+  zero_shot:
+    enabled: true
+  code_switch:
+    enabled: true
+
+# Benchmarking configuration
+benchmarking:
+  use_flores_200: true
+
+# General configuration
+seed: 42
+logging:
+  log_file: "./logs/evaluation.log"
+  log_level: "INFO"
+device: "auto"
+
+# Authentication configuration
+auth_token: "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"  
+
+cache:
+  dir: "./model_cache"
