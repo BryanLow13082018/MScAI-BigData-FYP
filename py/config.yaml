@@ -1,9 +1,9 @@
 # Model configuration
 model:
   names:
-    - "afro-xlmr-large"
+    - "Davlan/afro-xlmr-large"
     - "meta-llama/Llama-2-7b-hf"  
-    #    - "ernie-m-large"
+    - "models/gemini-1.5-flash-001-tuning"
   output_dir: "./model_outputs"
 
 # Data configuration
@@ -68,6 +68,8 @@ device: "auto"
 
 # Authentication configuration
 auth_token: "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"  
+google_api_token: "AIzaSyC_XjoqecKb1jLmVmtY_G_8W9tUfAe83oA"
+google_project_id: "176028983486"
 
 cache:
   dir: "./model_cache"

@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional, List, Union
 from functools import lru_cache
 from sklearn.model_selection import train_test_split
 from collections import Counter
+from datasets import load_dataset
 
 # Constants for dataset size limits
 MASAKHANE_SAMPLE_SIZE = 500
@@ -29,7 +30,6 @@ class DatasetLoader:
         # Set up directory paths
         self.masakhane_dir = os.path.abspath(config['data']['masakhane_dir'])
         self.flores_dir = os.path.abspath(config['data']['flores_dir'])
-        self.experiments_dir = os.path.abspath(config['data']['experiments_dir'])
         self.ontonotes_dir = os.path.abspath(config['data']['ontonotes_dir'])
 
         self._check_directories()
@@ -47,7 +47,6 @@ class DatasetLoader:
         for dir_name, dir_path in [
             ("Masakhane", self.masakhane_dir),
             ("FLORES-200", self.flores_dir),
-            ("Experiments", self.experiments_dir),
             ("OntoNotes", self.ontonotes_dir)
         ]:
             # Log directory paths
@@ -69,16 +68,6 @@ class DatasetLoader:
         masakhane = self._load_masakhane_datasets()
         if masakhane:
             datasets['masakhane'] = masakhane
-    
-        flores_200 = self.load_flores_200_benchmark()
-        if flores_200:
-            datasets['flores_200_benchmark'] = flores_200
-        else:
-            self.logger.warning("FLORES-200 benchmark data is empty or failed to load")
-    
-        experimental_datasets = self.load_experimental_datasets()
-        if experimental_datasets:
-            datasets['experimental'] = experimental_datasets
     
         ontonotes = self.load_ontonotes()
         if ontonotes:
@@ -159,205 +148,203 @@ class DatasetLoader:
 
     def load_flores_200_benchmark(self) -> Dict[str, pd.DataFrame]:
         """
-        Load and prepare the FLORES-200 dataset for translation tasks.
-
+        Load and prepare the FLORES-200 dataset for translation tasks using the Hugging Face Datasets library.
+    
         Returns:
-            Dict[str, pd.DataFrame]: A dictionary containing DataFrames for 'dev' and 'devtest' splits,
-                                    with columns: src_lang, tgt_lang, src_text, tgt_text
+            Dict[str, pd.DataFrame]: A dictionary containing DataFrames for 'devtest' splits,
+                                     with columns: src_lang, tgt_lang, src_text, tgt_text.
         """
-        flores_data = {'dev': [], 'devtest': []}
-        target_languages = ['swh', 'kin', 'lug']  # ISO codes for Swahili, Kinyarwanda, and Luganda
-        english_code = 'eng'
-
-        self.logger.info(f"FLORES-200 directory: {self.flores_dir}")
-
-        if not os.path.exists(self.flores_dir):
-            self.logger.error(f"FLORES-200 directory does not exist: {self.flores_dir}")
-            return {}
-
+        flores_data = {'devtest': []}
+        target_languages = ['swh_Latn', 'kin_Latn', 'lug_Latn']  # ISO codes with script variants for Swahili, Kinyarwanda, and Luganda
+        english_code = 'eng_Latn'  # ISO code for English
+    
         try:
-            for split in ['dev', 'devtest']:
-                split_dir = os.path.join(self.flores_dir, split)
-                self.logger.info(f"Checking split directory: {split_dir}")
-                if not os.path.exists(split_dir):
-                    self.logger.warning(f"Split directory not found: {split_dir}")
-                    continue
-
-                files = os.listdir(split_dir)
-                self.logger.info(f"Files in {split} directory: {files}")
-
-                eng_file = f"{english_code}_Latn.{split}"
-                eng_file_path = os.path.join(split_dir, eng_file)
-                self.logger.info(f"Looking for English file: {eng_file_path}")
-
-                if eng_file in files:
-                    self.logger.info(f"Processing English file: {eng_file_path}")
-                    try:
-                        eng_lines = pd.read_csv(eng_file_path, header=None, names=['text'])
-                        self.logger.info(f"Number of lines in English file: {len(eng_lines)}")
-                    except Exception as e:
-                        self.logger.error(f"Error reading English file {eng_file_path}: {str(e)}")
-                        continue
-
-                    for lang in target_languages:
-                        lang_file = f"{lang}_Latn.{split}"
-                        lang_file_path = os.path.join(split_dir, lang_file)
-                        self.logger.info(f"Checking for language file: {lang_file_path}")
-
-                        if lang_file in files:
-                            try:
-                                lang_lines = pd.read_csv(lang_file_path, header=None, names=['text'])
-                                self.logger.info(f"Number of lines in {lang} file: {len(lang_lines)}")
-
-                                if len(eng_lines) != len(lang_lines):
-                                    self.logger.warning(f"Mismatch in number of lines between English and {lang} files")
-                                    continue
-
-                                for eng_text, lang_text in zip(eng_lines['text'], lang_lines['text']):
-                                    flores_data[split].append({
-                                        'src_lang': english_code,
-                                        'tgt_lang': lang,
-                                        'src_text': eng_text.strip(),
-                                        'tgt_text': lang_text.strip(),
-                                    })
-                                    flores_data[split].append({
-                                        'src_lang': lang,
-                                        'tgt_lang': english_code,
-                                        'src_text': lang_text.strip(),
-                                        'tgt_text': eng_text.strip(),
-                                    })
-                            except Exception as e:
-                                self.logger.error(f"Error processing {lang} file {lang_file_path}: {str(e)}")
-                        else:
-                            self.logger.warning(f"Language file not found: {lang_file}")
-                else:
-                    self.logger.warning(f"English file not found: {eng_file}")
-
+            for lang in target_languages:
+                # Construct the language pair configuration (e.g., swh_Latn-eng_Latn)
+                lang_pair = f"{lang}-{english_code}"
+    
+                # Load the devtest split for each language pair (English ↔ target language)
+                dataset = load_dataset("facebook/flores", lang_pair, split='devtest', trust_remote_code=True)
+    
+                self.logger.info(f"Loaded FLORES-200 devtest for {lang}-English with {len(dataset)} samples")
+    
+                # Define the correct column names based on the languages
+                src_col = f"sentence_{english_code}"
+                tgt_col = f"sentence_{lang}"
+    
+                # Loop through the dataset and extract both translation directions
+                for example in dataset:
+                    # Ensure the correct columns exist in the dataset
+                    if src_col in example and tgt_col in example:
+                        # English to Target Language (eng_Latn -> lang)
+                        flores_data['devtest'].append({
+                            'src_lang': english_code,
+                            'tgt_lang': lang,
+                            'src_text': example[src_col].strip(),
+                            'tgt_text': example[tgt_col].strip(),
+                        })
+                        # Target Language to English (lang -> eng_Latn)
+                        flores_data['devtest'].append({
+                            'src_lang': lang,
+                            'tgt_lang': english_code,
+                            'src_text': example[tgt_col].strip(),
+                            'tgt_text': example[src_col].strip(),
+                        })
+                    else:
+                        self.logger.warning(f"Expected columns not found in dataset for {lang_pair}")
+    
             # Convert lists to DataFrames
             result = {
                 split: pd.DataFrame(data) for split, data in flores_data.items() if data
             }
-
+    
             for split, df in result.items():
                 self.logger.info(f"Loaded FLORES-200 {split} dataset with {len(df)} samples")
-
+    
             if not result:
                 self.logger.warning("No FLORES-200 data was loaded")
-
+    
             return result
-
+    
         except Exception as e:
             self.logger.error(f"Error loading FLORES-200 dataset: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            return {}  # Return an empty dictionary on error
+            return {}
 
     def load_ontonotes(self) -> Dict[str, pd.DataFrame]:
         """
         Load OntoNotes 5.0 dataset.
-
+    
         Returns:
-            Dict[str, pd.DataFrame]: A dictionary containing DataFrames for 'train', 'development', and 'test' splits.
+            Dict[str, pd.DataFrame]: A dictionary containing DataFrames for 'train', 'dev', and 'test' splits.
         """
         if not self.ontonotes_dir:
             self.logger.error("OntoNotes directory not specified in config.")
             return {}
-
-        splits = ['train', 'development', 'test']
+    
+        splits = ['train', 'dev', 'test']
         datasets = {}
-
-        for split in splits:
-            split_files = self._load_split_files(split)
-            data = self._load_ontonotes_data(split_files)
-            df = pd.DataFrame(data)
-            
-            # Sample the data if it's too large
-            if len(df) > ONTONOTES_SAMPLE_SIZE:
-                df = df.sample(n=ONTONOTES_SAMPLE_SIZE, random_state=self.config['seed'])
-            
-            datasets[split] = df
-
+    
+        for split_name in splits:
+            split_dir = os.path.join(self.ontonotes_dir, split_name)
+            if not os.path.exists(split_dir):
+                self.logger.warning(f"Split directory not found: {split_dir}")
+                continue
+    
+            data = self._load_ontonotes_split(split_dir, split_name)
+            if data:
+                df = pd.DataFrame(data)
+                if len(df) > ONTONOTES_SAMPLE_SIZE:
+                    df = df.sample(n=ONTONOTES_SAMPLE_SIZE, random_state=self.config['seed'])
+                datasets[split_name] = df
+                self.logger.info(f"Loaded {len(df)} samples for {split_name} split")
+    
         return datasets
-
-    def _load_split_files(self, split: str) -> List[str]:
+    
+    def _load_ontonotes_split(self, split_dir: str, split_name: str) -> List[Dict[str, Any]]:
         """
-        Load the list of files for a specific split in OntoNotes.
-
+        Recursively load OntoNotes data from a split directory.
+    
         Args:
-            split (str): The split name ('train', 'development', or 'test').
-
+            split_dir (str): Path to the split directory
+            split_name (str): Name of the split ('train', 'dev', 'test')
+    
         Returns:
-            List[str]: A list of file paths for the specified split.
-        """
-        split_file = os.path.join(self.ontonotes_dir, f'{split}.txt')
-        if not os.path.exists(split_file):
-            self.logger.warning(f"Split file not found: {split_file}")
-            return []
-        
-        with open(split_file, 'r') as f:
-            return [line.strip() for line in f]
-
-    def _load_ontonotes_data(self, file_paths: List[str]) -> List[Dict[str, Any]]:
-        """
-        Load OntoNotes data from the specified file paths.
-
-        Args:
-            file_paths (List[str]): List of file paths to load.
-
-        Returns:
-            List[Dict[str, Any]]: A list of dictionaries containing the loaded data.
+            List[Dict[str, Any]]: List of processed data samples
         """
         data = []
-        for file_path in file_paths:
-            full_path = os.path.join(self.ontonotes_dir, file_path)
-            if not os.path.exists(full_path):
-                self.logger.warning(f"File not found: {full_path}")
-                continue
-
-            with open(full_path, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-                sentences = content.split('\n\n')
-                for sentence in sentences:
-                    tokens = []
-                    ner_tags = []
-                    for line in sentence.split('\n'):
-                        parts = line.split()
-                        if len(parts) >= 11:
-                            tokens.append(parts[3])
-                            ner_tags.append(parts[10])
-                    data.append({
-                        'text': ' '.join(tokens),
-                        'label': ' '.join(ner_tags),
-                        'language': 'eng',  # OntoNotes is in English
-                        'split': os.path.basename(os.path.dirname(file_path))
-                    })
+        
+        def process_file(file_path: str, category: str) -> None:
+            """Process individual annotation file"""
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    sentences = content.split('\n\n')
+                    for sentence in sentences:
+                        tokens = []
+                        ner_tags = []
+                        for line in sentence.split('\n'):
+                            parts = line.split()
+                            if len(parts) >= 11:
+                                tokens.append(parts[3])
+                                ner_tags.append(parts[10])
+                        if tokens and ner_tags:
+                            data.append({
+                                'text': ' '.join(tokens),
+                                'label': ' '.join(ner_tags),
+                                'language': 'eng',
+                                'split': split_name,
+                                'category': category
+                            })
+            except Exception as e:
+                self.logger.error(f"Error processing file {file_path}: {str(e)}")
+    
+        # Walk through all directories and find .gold_conll files
+        for root, _, files in os.walk(split_dir):
+            for file in files:
+                if file.endswith('.gold_conll'):
+                    file_path = os.path.join(root, file)
+                    # Get category from path (first directory after split)
+                    rel_path = os.path.relpath(root, split_dir)
+                    category = rel_path.split(os.sep)[0]
+                    process_file(file_path, category)
+    
+        if not data:
+            self.logger.warning(f"No data found in {split_dir}")
+        else:
+            self.logger.info(f"Loaded {len(data)} samples from {split_dir}")
+            # Log distribution across categories
+            category_counts = Counter(item['category'] for item in data)
+            self.logger.info(f"Category distribution for {split_name}:")
+            for category, count in category_counts.items():
+                self.logger.info(f"  {category}: {count} samples")
+    
         return data
 
-    def load_experimental_datasets(self) -> Dict[str, pd.DataFrame]:
+    def load_experimental_datasets(self, flores_200: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
         """
-        Load experimental datasets (zero-shot and code-switch) from CSV files.
-
+        Load the zero-shot and code-switch datasets from the existing FLORES-200 dataset.
+    
+        Args:
+            flores_200 (Dict[str, pd.DataFrame]): The loaded FLORES-200 dataset.
+    
         Returns:
-            Dict[str, pd.DataFrame]: A dictionary containing 'zero_shot' and 'code_switch' DataFrames.
+            Dict[str, pd.DataFrame]: A dictionary containing 'devtest' for both zero-shot and code-switch tasks.
         """
-        zero_shot_path = os.path.join(self.experiments_dir, 'zero_shot_dataset.csv')
-        code_switch_path = os.path.join(self.experiments_dir, 'code_switch_dataset.csv')
-
+        # Prepare the dictionary to hold datasets
+        datasets = {}
+    
         try:
-            zero_shot_df = pd.read_csv(zero_shot_path)
-            code_switch_df = pd.read_csv(code_switch_path)
-        except FileNotFoundError as e:
-            self.logger.error(f"Error loading experimental datasets: {str(e)}")
-            return {}
+            # Reuse FLORES-200 'devtest' split for both zero-shot and code-switch tasks
+            devtest_df = flores_200['devtest']
+            datasets['zero_shot'] = devtest_df
+            datasets['code_switch'] = devtest_df  # Same dataset for both tasks
+            self.logger.info(f"Loaded FLORES-200 'devtest' dataset with {len(devtest_df)} samples for both zero-shot and code-switch tasks.")
+    
+        except KeyError as e:
+            self.logger.error(f"Error: 'devtest' split not found in FLORES-200 dataset: {str(e)}")
+            datasets['zero_shot'] = pd.DataFrame()  # Return empty DataFrame on failure
+            datasets['code_switch'] = pd.DataFrame()  # Return empty DataFrame on failure
+    
+        return datasets
 
-        # Add necessary columns to match other datasets
-        for df in [zero_shot_df, code_switch_df]:
-            df['language'] = 'eng'  # Assume English for simplicity
-            df['split'] = df.index.map(lambda x: 'zero_shot' if x < len(zero_shot_df) else 'code_switch')
-
-        return {
-            'zero_shot': zero_shot_df,
-            'code_switch': code_switch_df
-        }
+    
+    def generate_code_switched_text(self, swahili_text: str, english_text: str) -> str:
+        """
+        Simulates code-switching by combining parts of Swahili and English sentences.
+        Example of intra-sentence mixing.
+        """
+        swahili_words = swahili_text.split()
+        english_words = english_text.split()
+        
+        # Simple strategy to alternate between languages
+        mixed_sentence = []
+        for i in range(max(len(swahili_words), len(english_words))):
+            if i % 2 == 0 and i < len(swahili_words):
+                mixed_sentence.append(swahili_words[i])
+            elif i < len(english_words):
+                mixed_sentence.append(english_words[i])
+        
+        return " ".join(mixed_sentence)
 
     def _load_text_file(self, file_path: str) -> Optional[pd.DataFrame]:
         """
@@ -415,6 +402,9 @@ class DatasetLoader:
         Returns:
             pd.DataFrame: The cleaned dataset with missing values replaced.
         """
+        # Create a copy of the dataset to avoid modifying the original
+        dataset = dataset.copy()
+        
         # Define replacements
         replacements = {
             'text': 'unknown',
@@ -426,7 +416,8 @@ class DatasetLoader:
         for col, default in replacements.items():
             if col in dataset.columns:
                 n_before = dataset[col].isnull().sum()
-                dataset[col].fillna(default, inplace=True)
+                # Use direct assignment instead of inplace
+                dataset[col] = dataset[col].fillna(default)
                 n_after = dataset[col].isnull().sum()
                 if n_before > 0:
                     self.logger.info(f"Replaced {n_before} missing values in column '{col}' with '{default}'.")
@@ -494,17 +485,7 @@ class DatasetLoader:
             else:
                 self.logger.warning(f"Masakhane {lang} dataset not found")
 
-        # Process FLORES-200 data
-        if 'flores_200_benchmark' in datasets:
-            flores_data = datasets['flores_200_benchmark']
-            for split, df in flores_data.items():
-                self.logger.info(f"FLORES-200 {split} dataset shape: {df.shape}")
-                df['split'] = f'flores_200_{split}'
-                df = df.sample(n=min(FLORES_SAMPLE_SIZE, len(df)), random_state=self.config['seed'])
-                self.logger.info(f"Reduced FLORES-200 {split} dataset shape: {df.shape}")
-                benchmark_data.append(df)
-        else:
-            self.logger.warning("FLORES-200 benchmark data not found")
+        
 
         # Process OntoNotes data
         if 'ontonotes' in datasets:
@@ -535,9 +516,9 @@ class DatasetLoader:
         benchmark = benchmark[columns_to_keep]
 
         # Further reduce overall dataset sizes
-        train = train.sample(n=min(2000, len(train)), random_state=self.config['seed'])
-        eval = eval.sample(n=min(500, len(eval)), random_state=self.config['seed'])
-        benchmark = benchmark.sample(n=min(500, len(benchmark)), random_state=self.config['seed'])
+        # train = train.sample(n=min(2000, len(train)), random_state=self.config['seed'])
+        # eval = eval.sample(n=min(500, len(eval)), random_state=self.config['seed'])
+        # benchmark = benchmark.sample(n=min(500, len(benchmark)), random_state=self.config['seed'])
 
         self.logger.info(f"Final dataset sizes - Train: {len(train)}, Eval: {len(eval)}, Benchmark: {len(benchmark)}")
 
