@@ -461,12 +461,19 @@ class CombinedEncoderDecoderTrainer:
         
                     # Combine encoder hidden states with decoder input embeddings
                     combined_input = torch.cat([encoder_hidden_states, decoder_inputs_embeds], dim=-1)
-                    logging.debug(f"Combined input shape: {combined_input.shape}")
-            
+                    combined_input = torch.nan_to_num(combined_input, nan=0.0)
+                    
                     # Check for NaN in combined_input
                     if torch.isnan(combined_input).any():
-                        logging.error("NaN values detected in combined_input")
-                        return None
+                        logging.error(f"NaN values detected in combined_input for batch {self.current_step}")
+                        logging.debug(f"Encoder hidden states stats: min={encoder_hidden_states.min().item():.4f}, max={encoder_hidden_states.max().item():.4f}, mean={encoder_hidden_states.mean().item():.4f}")
+                        logging.debug(f"Decoder inputs embeds stats: min={decoder_inputs_embeds.min().item():.4f}, max={decoder_inputs_embeds.max().item():.4f}, mean={decoder_inputs_embeds.mean().item():.4f}")
+
+                        # Instead of returning None, let's try to recover
+                        combined_input = torch.where(torch.isnan(combined_input), torch.zeros_like(combined_input), combined_input)
+                        logging.info(f"Attempted to recover from NaN values in combined_input for batch {self.current_step}")
+
+                        logging.debug(f"Combined input shape: {combined_input.shape}")
                     
                     # Check if we need to update the projection layer
                     if self.projection.in_features != combined_input.size(-1):
@@ -551,16 +558,29 @@ class CombinedEncoderDecoderTrainer:
                     torch.nn.utils.clip_grad_norm_(self.decoder.parameters(), max_norm=1.0)
                 
                     # Compute the loss using custom_loss function
-                    loss = self.custom_loss(logits, decoder_labels)
-    
-            if torch.isnan(loss) or torch.isinf(loss):
-                logging.error("NaN or Inf loss detected")
-                return None
+                    try:
+                        loss = self.custom_loss(logits, decoder_labels)
+                        if torch.isnan(loss) or torch.isinf(loss):
+                            logging.error(f"NaN or Inf loss detected for batch {self.current_step}")
+                            
+                            # Instead of returning None, set loss to a very high value
+                            loss = torch.tensor(1e6, device=logits.device, dtype=logits.dtype)
+                            logging.info(f"Set loss to high value (1e6) for batch {self.current_step} due to NaN/Inf")
+                            
+                    except Exception as e:
+                        logging.error(f"Error in loss computation for batch {self.current_step}: {str(e)}")
+                        
+                        # Set loss to a high value instead of returning None
+                        loss = torch.tensor(1e6, device=logits.device, dtype=logits.dtype)
+                        logging.info(f"Set loss to high value (1e6) for batch {self.current_step} due to error")
     
             # Scale the loss if using gradient accumulation
             if self.config['gradient_accumulation_steps'] > 1:
                 loss = loss / self.config['gradient_accumulation_steps']
-                
+
+            torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.decoder.parameters(), max_norm=1.0)
+            
             # Perform backpropagation
             self.accelerator.backward(loss)
     
@@ -585,7 +605,7 @@ class CombinedEncoderDecoderTrainer:
             logging.error(f"Error type: {type(e).__name__}")
             logging.error(f"Error traceback:\n{traceback.format_exc()}")
             return None
-
+            
     def init_embed_tokens(self):
         """
         Initialize the weights of the embed_tokens layer.
@@ -1479,4 +1499,319 @@ class CombinedEncoderDecoderTrainer:
             torch.cuda.empty_cache()
             logging.debug("GPU memory cleared")
             logging.info(f"Cleared GPU memory. Current allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+
+
+    def evaluate_translation(self, datasets, evaluator, best_params):
+        """
+        Evaluate translation performance using encoder-decoder model.
+
+        Args:
+            datasets (Dict[str, pd.DataFrame]): Dictionary containing datasets, must include 'devtest' key.
+            evaluator (object): An object with an 'evaluate' method to assess translation quality.
+            best_params (dict): Dictionary containing hyperparameters, including:
+                - 'per_device_train_batch_size' (int): Batch size for processing.
+                - 'gradient_accumulation_steps' (int): Number of steps for gradient accumulation.
+
+        Returns:
+            dict: A dictionary containing evaluation results, including:
+                - 'translations': Nested dict with translation scores for each language pair.
+                - 'average_score': Overall average translation score across all language pairs.
+        """
+        try:
+            # Use class attributes for encoder, decoder, tokenizers, etc.
+            encoder = self.encoder
+            decoder = self.decoder
+            encoder_tokenizer = self.encoder_tokenizer
+            decoder_tokenizer = self.decoder_tokenizer
+
+            # Set the device to CUDA or CPU
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            dtype = self.dtype  # Using class dtype (bfloat16)
+            
+            # Move models to GPU and set to evaluation mode
+            encoder = encoder.to(device).eval()
+            decoder = decoder.to(device).eval()
+
+            results = {'translations': {}}
+            target_languages = ['swh_Latn', 'kin_Latn', 'lug_Latn']
+            english_code = 'eng_Latn'
+
+            batch_size = best_params.get('per_device_train_batch_size', 16)
+            logging.info(f"Using batch size: {batch_size}")
+
+            if 'devtest' not in datasets:
+                logging.error("Expected 'devtest' key not found in datasets")
+                return results
+
+            df = datasets['devtest']
+            logging.info(f"FLORES-200 'devtest' dataset shape: {df.shape}")
+            logging.info(f"FLORES-200 'devtest' columns: {df.columns}")
+
+            # Get encoder hidden size and decoder hidden size dynamically
+            encoder_hidden_size = encoder.config.hidden_size  # e.g., 1024
+            decoder_hidden_size = decoder.config.hidden_size  # e.g., 4096
+
+            logging.info(f"Encoder hidden size: {encoder_hidden_size}")
+            logging.info(f"Decoder hidden size: {decoder_hidden_size}")
+
+            results['translations']['devtest'] = {}
+
+            for lang in target_languages:
+                try:
+                    eng_to_lang = df[(df['src_lang'] == english_code) & (df['tgt_lang'] == lang)]
+                    
+                    if len(eng_to_lang) == 0:
+                        logging.warning(f"No data found for {english_code} to {lang} translation in 'devtest'. Skipping.")
+                        continue
+                    
+                    eng_texts = eng_to_lang['src_text'].tolist()
+                    lang_texts = eng_to_lang['tgt_text'].tolist()
+
+                    logging.info(f"Translating {len(eng_texts)} sentences from {english_code} to {lang} in 'devtest'")
+
+                    translations = []
+
+                    for i in range(0, len(eng_texts), batch_size):
+
+                        batch_texts = eng_texts[i:i+batch_size]
+
+                        if not batch_texts:
+                            break
+
+                        try:
+                            # Tokenize input text using encoder tokenizer
+                            encoder_inputs = encoder_tokenizer(batch_texts, return_tensors="pt", padding=True, truncation=True, max_length=128)
+                            
+                            # Log the types and shapes of input tensors
+                            for k, v in encoder_inputs.items():
+                                logging.info(f"{k} shape: {v.shape}, dtype: {v.dtype}")
+                            
+                            # Check for NaN/Inf before moving tensors to the device
+                            for k, v in encoder_inputs.items():
+                                if torch.is_floating_point(v) and (torch.isnan(v).any() or torch.isinf(v).any()):
+                                    logging.error(f"NaN or Inf detected in {k}")
+                                    raise ValueError(f"NaN or Inf values detected in encoder input: {k}")
+                            
+                            # Move inputs to device and convert only floating-point tensors to bfloat16
+                            encoder_inputs = {
+                                k: (v.to(device).to(dtype) if torch.is_floating_point(v) else v.to(device)) 
+                                for k, v in encoder_inputs.items()
+                            }
+
+                            # Forward pass through the encoder model
+                            with torch.no_grad():
+                                encoder_outputs = encoder(**encoder_inputs, output_hidden_states=True)
+
+                            # Log the structure of encoder_outputs for debugging
+                            # logging.info(f"Encoder outputs type: {type(encoder_outputs)}")
+                            # logging.info(f"Encoder outputs keys/attributes: {dir(encoder_outputs)}")
+
+                            # Process encoder outputs (ensure the shape is (batch_size, sequence_length, encoder_hidden_size))
+                            if hasattr(encoder_outputs, 'hidden_states'):
+                                # Use the last hidden state from the encoder (usually the last element in the hidden_states tuple)
+                                encoder_hidden_states = encoder_outputs.hidden_states[-1]  # Shape: (batch_size, sequence_length, encoder_hidden_size)
+                            else:
+                                raise ValueError("Hidden states not available in encoder outputs.")
+
+                            # Log shape of the encoder hidden states for debugging
+                            logging.info(f"Encoder hidden states shape: {encoder_hidden_states.shape}")
+
+                            # Check for NaN/Inf values before projection
+                            if torch.isnan(encoder_hidden_states).any() or torch.isinf(encoder_hidden_states).any():
+                                logging.error("NaN or Inf values detected in encoder hidden states.")
+                                continue
+
+                            # Log the shape of encoder_hidden_states before pooling
+                            logging.info(f"Encoder hidden states shape: {encoder_hidden_states.shape}")  # Expect (batch_size, sequence_length, encoder_hidden_size)
+
+                            # Apply mean pooling to reduce encoder output to (batch_size, encoder_hidden_size)
+                            pooled_hidden_states = torch.mean(encoder_hidden_states, dim=1)  # Shape: (batch_size, encoder_hidden_size)
+                            logging.info(f"Pooled hidden state shape: {pooled_hidden_states.shape}")  # Should  be (batch_size, encoder_hidden_size)
+
+                            # Dynamically check the actual batch size for this batch
+                            # pooled_hidden_states should be (batch_size, encoder_hidden_size)
+                            actual_batch_size = pooled_hidden_states.shape[0]
+                            assert pooled_hidden_states.shape == (actual_batch_size, encoder_hidden_size), \
+                                f"Expected pooled hidden states shape to be ({actual_batch_size}, {encoder_hidden_size}), got {pooled_hidden_states.shape}"
+
+                            # Initialize the projection layer after confirming valid input
+                            # Ensure that the projection applies to the entire batch, maintaining (batch_size, decoder_hidden_size)
+                            encoder_to_decoder_proj = nn.Linear(encoder_hidden_size, decoder_hidden_size).to(device).to(dtype)
+
+                            # Apply the projection to match decoder hidden size (batch_size, decoder_hidden_size)
+                            projected_hidden_states = encoder_to_decoder_proj(pooled_hidden_states)  # Should be (batch_size, decoder_hidden_size)
+                            logging.info(f"Projected hidden state shape after projection: {projected_hidden_states.shape}")
+
+                            # Ensure no NaN/Inf in projected hidden states
+                            projected_hidden_states = torch.nan_to_num(projected_hidden_states, nan=0.0, posinf=0.0, neginf=0.0)
+
+                            # Add an extra dimension to match (batch_size, 1, decoder_hidden_size)
+                            projected_hidden_states = projected_hidden_states.unsqueeze(1)  # Shape should now be (batch_size, 1, decoder_hidden_size)
+                            logging.info(f"Final projected hidden state shape: {projected_hidden_states.shape}")
+                            
+                            # Ensure the shape is correct
+                            # Get the actual batch size for the current batch
+                            actual_batch_size = projected_hidden_states.shape[0]
+                            
+                            # Ensure the shape is correct dynamically for the actual batch size
+                            if projected_hidden_states.shape != (actual_batch_size, 1, decoder_hidden_size):
+                                raise ValueError(f"Incorrect shape for projected_hidden_states. Expected ({actual_batch_size}, 1, {decoder_hidden_size}), got {projected_hidden_states.shape}")
+
+
+                            # Generate translation using the decoder model
+                            with torch.no_grad():
+                                batch_translations = decoder.generate(
+                                    inputs_embeds=projected_hidden_states,
+                                    max_new_tokens=128,
+                                    num_beams=4,
+                                )
+
+                            # Decode the generated translations
+                            decoded_translations = decoder_tokenizer.batch_decode(batch_translations, skip_special_tokens=True)
+                            translations.extend(decoded_translations)
+
+                        except Exception as e:
+                            logging.error(f"Error during translation for batch {i // batch_size}: {str(e)}")
+                            logging.error(f"Error traceback: {traceback.format_exc()}")
+                            logging.error(f"Problematic tensor shape: {projected_hidden_states.shape}")
+                            continue
+
+                    # Evaluate the translations
+                    logging.info("Evaluating translations...")
+                    scores = evaluator.evaluate(eng_texts[:len(translations)], translations, lang_texts[:len(translations)])
+                    results['translations']['devtest'][f'{english_code}_to_{lang}'] = scores
+                    
+                except Exception as e:
+                    logging.error(f"Error during translation evaluation for language {lang} in 'devtest': {str(e)}")
+                    logging.error(f"Error traceback: {traceback.format_exc()}")
+                    results['translations']['devtest'][f'{english_code}_to_{lang}'] = {'error': str(e)}
+
+            # Calculate the overall average translation score
+            all_scores = [score['average_score'] for score in results['translations']['devtest'].values() if isinstance(score, dict) and 'average_score' in score]
+            if all_scores:
+                results['average_score'] = np.mean(all_scores)
+                logging.info(f"Overall average translation score: {results['average_score']}")
+            else:
+                results['average_score'] = np.nan
+                logging.warning("No valid scores for translations")
+
+            return results
+
+        except Exception as e:
+            logging.error(f"Error during evaluation: {str(e)}")
+            logging.error(f"Error traceback: {traceback.format_exc()}")
+            return {'error': str(e)}
+    
+
+    def evaluate_zero_shot(zero_shot_df, zero_shot_classifier, best_params):
+        """
+        Evaluate the model's zero-shot classification performance using ZeroShotClassifier.
+
+        Args:
+            zero_shot_df (pd.DataFrame): The dataset containing zero-shot evaluation data.
+            zero_shot_classifier (ZeroShotClassifier): The zero-shot classifier object.
+            best_params (dict): A dictionary of hyperparameters (e.g., batch size).
+
+        Returns:
+            dict: A dictionary containing performance metrics (accuracy, F1 score, etc.).
+        """
+        logging.info("Starting zero-shot evaluation...")
+
+        # Ensure the dataset has the correct structure
+        if 'src_text' not in zero_shot_df.columns or 'tgt_text' not in zero_shot_df.columns:
+            logging.error("Zero-shot data must contain 'src_text' and 'tgt_text' columns.")
+            raise ValueError("Zero-shot data must contain 'src_text' and 'tgt_text' columns.")
+
+        # Extract source texts and true target labels from the dataframe
+        src_texts = zero_shot_df['src_text'].tolist()
+        tgt_texts = zero_shot_df['tgt_text'].tolist()
+
+        # Define candidate labels for zero-shot classification (if needed, based on your use case)
+        candidate_labels = zero_shot_df['candidate_labels'].tolist() if 'candidate_labels' in zero_shot_df.columns else None
+
+        logging.info(f"Total samples for evaluation: {len(src_texts)}")
+        
+        # Get batch size from best_params, with a default value if not specified
+        batch_size = best_params.get('per_device_eval_batch_size', 16)
+
+        # Set the batch size in ZeroShotClassifier before evaluation
+        zero_shot_classifier.batch_size = batch_size
+
+        # Perform zero-shot classification using the classifier
+        results = zero_shot_classifier.evaluate(src_texts, tgt_texts, candidate_labels)
+
+        # Extract metrics
+        classification_accuracy = results.get('accuracy', 0.0)
+        detailed_results = results.get('results', [])
+
+        # Optionally calculate other metrics (like F1 score) using the detailed results
+        predicted_labels = [result['labels'][0] for result in detailed_results]  # Extract top predicted labels
+        classification_f1 = f1_score(tgt_texts, predicted_labels, average='weighted')
+
+        logging.info(f"Classification accuracy: {classification_accuracy}")
+        logging.info(f"Classification F1 score: {classification_f1}")
+
+        return {
+            'classification_accuracy': classification_accuracy,
+            'classification_f1': classification_f1,
+            'detailed_results': detailed_results  # Include detailed results if needed
+        }
+
+
+    def evaluate_code_switch(code_switch_df, code_switch_classifier, best_params):
+        """
+        Evaluate the model's code-switch classification performance using CodeSwitchClassifier.
+
+        Args:
+            code_switch_df (pd.DataFrame): The dataset containing code-switch evaluation data.
+            code_switch_classifier (CodeSwitchClassifier): The code-switch classifier object.
+            best_params (dict): A dictionary containing model evaluation parameters (e.g., batch size).
+
+        Returns:
+            dict: A dictionary containing performance metrics (e.g., language accuracy).
+        """
+        logging.info("Starting code-switch evaluation...")
+
+        # Ensure the dataset has the correct structure
+        if 'src_text' not in code_switch_df.columns or 'tgt_lang' not in code_switch_df.columns:
+            logging.error("Code-switch data must contain 'src_text' and 'tgt_lang' columns.")
+            raise ValueError("Code-switch data must contain 'src_text' and 'tgt_lang' columns.")
+
+        # Extract source texts and expected target languages from the dataframe
+        src_texts = code_switch_df['src_text'].tolist()
+        
+        # Map FLORES-200 language codes to simplified language tags
+        flores_lang_map = {
+            'eng_Latn': 'eng',
+            'swh_Latn': 'swh',
+            'lug_Latn': 'lug',
+            'kin_Latn': 'kin'
+        }
+        
+        # Get the expected target languages and map them to simplified tags
+        expected_languages = [flores_lang_map.get(lang, 'unknown') for lang in code_switch_df['tgt_lang']]
+        
+        if 'unknown' in expected_languages:
+            logging.warning("Some languages in 'tgt_lang' were not recognized in the flores_lang_map.")
+
+        # Get batch size from best_params
+        batch_size = best_params.get('per_device_eval_batch_size', 16)
+
+        # Set the batch size in CodeSwitchClassifier before evaluation
+        code_switch_classifier.batch_size = batch_size
+
+        # Perform code-switch classification using the classifier
+        results = code_switch_classifier.evaluate(src_texts, expected_languages)
+
+        # Extract metrics
+        language_accuracy = results.get('accuracy', 0.0)
+        detailed_results = results.get('results', [])
+
+        # Log the final results
+        logging.info(f"Language accuracy: {language_accuracy}")
+
+        return {
+            'language_accuracy': language_accuracy,
+            'detailed_results': detailed_results  # Include detailed results if needed
+        }
     
